@@ -1,0 +1,211 @@
+name: Databricks CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      run_tests:
+        description: 'Run tests before deployment'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+  PYTHON_VERSION: '3.10'
+
+jobs:
+  # Job 1: Run tests on all PRs and pushes
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.run_tests)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pytest-cov databricks-sdk databricks-cli pyspark
+          pip install -r requirements.txt || true
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  # Job 2: Deploy to Dev (auto on main branch)
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: test
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.environment == 'dev')
+    environment:
+      name: dev
+      url: ${{ secrets.DATABRICKS_HOST }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Databricks CLI
+        run: |
+          pip install databricks-cli databricks-sdk
+
+      - name: Configure Databricks CLI
+        run: |
+          echo "${{ secrets.DATABRICKS_TOKEN }}" | databricks configure --token --host ${{ secrets.DATABRICKS_HOST }}
+
+      - name: Deploy Notebooks to Dev
+        run: |
+          python scripts/deploy_notebooks.py \
+            --environment dev \
+            --catalog dev1 \
+            --target-path /Workspace/Users/${{ secrets.DATABRICKS_USER }}/databricks_assessment/assessment1
+
+      - name: Run integration tests on Dev
+        run: |
+          python scripts/run_integration_tests.py --environment dev --catalog dev1
+
+      - name: Create deployment summary
+        run: |
+          echo "Deployed to DEV environment" >> $GITHUB_STEP_SUMMARY
+          echo "- Catalog: dev1" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Timestamp: $(date)" >> $GITHUB_STEP_SUMMARY
+
+  # Job 3: Deploy to QA (manual trigger)
+  deploy-qa:
+    name: Deploy to QA
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'qa'
+    environment:
+      name: qa
+      url: ${{ secrets.DATABRICKS_HOST }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Databricks CLI
+        run: |
+          pip install databricks-cli databricks-sdk
+
+      - name: Configure Databricks CLI
+        run: |
+          echo "${{ secrets.DATABRICKS_TOKEN }}" | databricks configure --token --host ${{ secrets.DATABRICKS_HOST }}
+
+      - name: Validate QA prerequisites
+        run: |
+          python scripts/validate_environment.py --environment qa --catalog uat1
+
+      - name: Deploy Notebooks to QA
+        run: |
+          python scripts/deploy_notebooks.py \
+            --environment qa \
+            --catalog uat1 \
+            --target-path /Workspace/Users/${{ secrets.DATABRICKS_USER }}/databricks_assessment/assessment1
+
+      - name: Run smoke tests on QA
+        run: |
+          python scripts/run_integration_tests.py --environment qa --catalog uat1
+
+      - name: Create deployment summary
+        run: |
+          echo "Deployed to QA environment" >> $GITHUB_STEP_SUMMARY
+          echo "- Catalog: uat1" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Timestamp: $(date)" >> $GITHUB_STEP_SUMMARY
+
+  # Job 4: Deploy to Prod (manual trigger with approval)
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'prod'
+    environment:
+      name: prod
+      url: ${{ secrets.DATABRICKS_HOST }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Databricks CLI
+        run: |
+          pip install databricks-cli databricks-sdk
+
+      - name: Configure Databricks CLI
+        run: |
+          echo "${{ secrets.DATABRICKS_TOKEN}}" | databricks configure --token --host ${{ secrets.DATABRICKS_HOST }}
+
+      - name: Validate Prod prerequisites
+        run: |
+          python scripts/validate_environment.py --environment prod --catalog prod1
+
+      - name: Create backup
+        run: |
+          python scripts/backup_notebooks.py --environment prod --catalog prod1
+
+      - name: Deploy Notebooks to Prod
+        run: |
+          python scripts/deploy_notebooks.py \
+            --environment prod \
+            --catalog prod1 \
+            --target-path /Workspace/Users/${{ secrets.DATABRICKS_USER }}/databricks_assessment/assessment1
+
+      - name: Run smoke tests on Prod
+        run: |
+          python scripts/run_integration_tests.py --environment prod --catalog prod1 --smoke-only
+
+      - name: Create deployment summary
+        run: |
+          echo "🚀 Deployed to PRODUCTION environment" >> $GITHUB_STEP_SUMMARY
+          echo "- Catalog: prod1" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Timestamp: $(date)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify deployment
+        run: |
+          echo "Production deployment completed successfully"
+          # Add Slack/email notification here if needed

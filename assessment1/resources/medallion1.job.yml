@@ -1,0 +1,27 @@
+resources:
+  jobs:
+    Medallion:
+      name: Medallion1
+      tasks:
+        - task_key: Run_Bronze
+          notebook_task:
+            notebook_path: /Workspace/Users/polasaipranav@gmail.com/databricks_assessment/assessment1/src/Bronze
+              Ingestion
+            source: WORKSPACE
+        - task_key: Run_Silver
+          depends_on:
+            - task_key: Run_Bronze
+          notebook_task:
+            notebook_path: /Workspace/Users/polasaipranav@gmail.com/databricks_assessment/assessment1/src/Silver
+              Cleaning
+            source: WORKSPACE
+        - task_key: Run_Gold
+          depends_on:
+            - task_key: Run_Silver
+          notebook_task:
+            notebook_path: /Workspace/Users/polasaipranav@gmail.com/databricks_assessment/assessment1/src/Gold
+              Layer
+            source: WORKSPACE
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
